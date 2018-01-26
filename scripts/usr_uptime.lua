@@ -4,6 +4,11 @@
 
         usage: [+!#]useruptime [CT1 <FIRSTNICK> | CT2 <NICK>]
 
+        v0.5
+            - fixed a bug that prevented OP from checking uptime on a user
+            - fixed a bug that ended up with people getting to low uptime
+            - Changed the date logic
+
         v0.4
             - saves uptime table every 10 minutes
 
@@ -26,7 +31,7 @@
 --------------
 
 local scriptname = "usr_uptime"
-local scriptversion = "0.4"
+local scriptversion = "0.5"
 
 local cmd = "useruptime"
 
@@ -54,6 +59,7 @@ local os_date = os.date
 local os_time = os.time
 local os_difftime = os.difftime
 local string_rep = string.rep
+local string_gmatch = string.gmatch
 
 --// imports
 local scriptlang = cfg_get( "language" )
@@ -73,7 +79,8 @@ local help_desc_op = lang.help_desc_op or "Shows the uptime stats of a user"
 
 local msg_denied = lang.msg_denied or "You are not allowed to use this command."
 local msg_usage = lang.msg_usage or "[+!#]useruptime CT1 <FIRSTNICK> | CT2 <NICK>"
-local msg_notfound = lang. msg_notfound or "User not found."
+local msg_notfound = lang.msg_notfound or "User not found."
+local msg_notonline = lang.msg_notonline or "User is offline"
 local msg_days = lang.msg_days or " days, "
 local msg_hours = lang.msg_hours or " hours, "
 local msg_minutes = lang.msg_minutes or " minutes, "
@@ -119,31 +126,68 @@ local msg_uptime = lang.msg_uptime or [[
 --[CODE]--
 ----------
 
-local delay = 10 * 60
+local delay = 30 * 60
 local start = os_time()
+local users_online = { }
 
 local oplevel = util_getlowestlevel( permission )
 
-local new_entry = function( user )
-    if not user:isbot() then
-        local month, year = tonumber( os_date( "%m" ) ), tonumber( os_date( "%Y" ) )
-        if type( uptime_tbl[ user:firstnick() ] ) == "nil" then
-            uptime_tbl[ user:firstnick() ] = {}
+local new_entry = function( firstnick )
+    local month, year = tonumber( os_date( "%m" ) ), tonumber( os_date( "%Y" ) )
+    if type( uptime_tbl[ firstnick ] ) == "nil" then
+        uptime_tbl[ firstnick ] = {}
+    end
+    if type( uptime_tbl[ firstnick ][ year ] ) == "nil" then
+        uptime_tbl[ firstnick ][ year ] = {}
+    end
+    if type( uptime_tbl[ firstnick ][ year ][ month ] ) == "nil" then
+        uptime_tbl[ firstnick ][ year ][ month ] = {}
+        uptime_tbl[ firstnick ][ year ][ month ][ "session_start" ] = os_time()
+        uptime_tbl[ firstnick ][ year ][ month ][ "complete" ] = 0
+    end
+
+end
+
+-- Following two functions are from Lua-Users Wiki
+local is_leap_year = function( month )
+    return year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0)
+end
+
+local get_days_in_month = function( month, year )
+    return month == 2 and is_leap_year( year ) and 29 or ( "\31\28\31\30\31\30\31\31\30\31\30\31" ):byte( month )
+end
+
+local update_uptime = function( firstnick )
+    local month, year = tonumber( os_date( "%m" ) ), tonumber( os_date( "%Y" ) )
+    if type( uptime_tbl[ firstnick ][ year ] ) == "nil" or type( uptime_tbl[ firstnick ][ year ][ month ]) == "nil" then
+        local prevyear = year
+        local prevmonth = month
+        if prevmonth == 1 then
+            prevyear = prevyear - 1
+            prevmonth = 12
+        else
+            prevmonth = prevmonth - 1
         end
-        if type( uptime_tbl[ user:firstnick() ][ year ] ) == "nil" then
-            uptime_tbl[ user:firstnick() ][ year ] = {}
-        end
-        if type( uptime_tbl[ user:firstnick() ][ year ][ month ] ) == "nil" then
-            uptime_tbl[ user:firstnick() ][ year ][ month ] = {}
-            uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ] = os_time()
-            uptime_tbl[ user:firstnick() ][ year ][ month ][ "complete" ] = 0
-        end
+        local days = get_days_in_month( prevmonth, prevyear )
+        local session_start = uptime_tbl[ firstnick ][ prevyear ][ prevmonth ][ "session_start" ]
+        local old_complete = uptime_tbl[ firstnick ][ prevyear ][ prevmonth ][ "complete" ]
+        local new_complete = os_difftime( os_time{year=prevyear, month=prevmonth, day=days, hour=23, min=59, sec=59}, session_start ) + old_complete
+        uptime_tbl[ firstnick ][ prevyear ][ prevmonth ][ "complete" ] = new_complete
+        new_entry( firstnick )
+        uptime_tbl[ firstnick ][ year ][ month ][ "session_start" ] = os_time{ year=year, month=month, day=1, hour=0, min=0, sec=0 }
+    end
+    if uptime_tbl[ firstnick ][ year ][ month ][ "session_start" ] > 0 then
+        local session_start = uptime_tbl[ firstnick ][ year ][ month ][ "session_start" ]
+        local old_complete = uptime_tbl[ firstnick ][ year ][ month ][ "complete" ]
+        local new_complete = os_difftime( os_time(), session_start ) + old_complete
+        uptime_tbl[ firstnick ][ year ][ month ][ "session_start" ] = os_time()
+        uptime_tbl[ firstnick ][ year ][ month ][ "complete" ] = new_complete
     end
 end
 
 local set_start = function( user )
-    new_entry( user )
     if not user:isbot() then
+        new_entry( user:firstnick() )
         local month, year = tonumber( os_date( "%m" ) ), tonumber( os_date( "%Y" ) )
         uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ] = os_time()
         util_savetable( uptime_tbl, "uptime", uptime_file )
@@ -152,21 +196,20 @@ local set_start = function( user )
 end
 
 local set_stop = function( user )
-    new_entry( user )
     if not user:isbot() then
+        update_uptime( user:firstnick() )
         local month, year = tonumber( os_date( "%m" ) ), tonumber( os_date( "%Y" ) )
-        local session_start = uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ]
-        local old_complete = uptime_tbl[ user:firstnick() ][ year ][ month ][ "complete" ]
-        local new_complete = os_difftime( os_time(), session_start ) + old_complete
-        uptime_tbl[ user:firstnick() ][ year ][ month ][ "complete" ] = new_complete
+        uptime_tbl[ user:firstnick() ][ year ][ month ][ "session_start" ] = 0
         util_savetable( uptime_tbl, "uptime", uptime_file )
         start = os_time()
     end
 end
 
+-- Update the users total uptime upon the run of the command
 local get_useruptime = function( firstnick )
     if type( uptime_tbl[ firstnick ] ) == "nil" then return false end
     local msg = ""
+    update_uptime( firstnick )
     for i_1 = 2015, 2100, 1 do
         for year, month_tbl in pairs( uptime_tbl[ firstnick ] ) do
             if year == i_1 then
@@ -196,10 +239,21 @@ local tbl = function()
     end
 end
 
+--// Forgot where, but this is based on sample found online
+local split = function( str, user )
+    local t = { }
+    local i = 0
+    for v in string_gmatch( str, "%S+" ) do
+        t[i] = v
+        i = i + 1
+    end
+    return t, i
+end
+
 local onbmsg = function( user, command, parameters )
     local user_level, user_firstnick = user:level(), user:firstnick()
-    local param1, param2 = utf_match( parameters, "^?(%S+) ?(%S+)$" )
-    if not ( param1 and param2 ) then
+    local params, length = split(parameters, user)
+    if ( length == 0) then
         if user_level >= minlevel then
             local uptime = get_useruptime( user_firstnick )
             if uptime then
@@ -218,20 +272,10 @@ local onbmsg = function( user, command, parameters )
         user:reply( msg_denied, hub_getbot )
         return PROCESSED
     end
-    if ( command == cmd ) and ( param1 == "CT1" ) and param2 then
-        local uptime = get_useruptime( param2 )
-        if uptime then
-            user:reply( uptime, hub_getbot )
-            return PROCESSED
-        else
-            user:reply( msg_notfound, hub_getbot )
-            return PROCESSED
-        end
-    end
-    if ( command == cmd ) and ( param1 == "CT2" ) and param2 then
-        local target = hub_isnickonline( param2 )
-        if target then
-            local uptime = get_useruptime( target:firstnick() )
+    if ( length == 2 ) then
+        local param1, param2 = params[0], params[1]
+        if ( command == cmd ) and ( param1 == "CT1" ) and param2 then
+            local uptime = get_useruptime( param2 )
             if uptime then
                 user:reply( uptime, hub_getbot )
                 return PROCESSED
@@ -240,8 +284,24 @@ local onbmsg = function( user, command, parameters )
                 return PROCESSED
             end
         end
+        if ( command == cmd ) and ( param1 == "CT2" ) and param2 then
+            local target = hub_isnickonline( param2 )
+            if target then
+                local uptime = get_useruptime( target:firstnick() )
+                if uptime then
+                    user:reply( uptime, hub_getbot )
+                    return PROCESSED
+                else
+                    user:reply( msg_notfound, hub_getbot )
+                    return PROCESSED
+                end
+            else
+                user:reply( msg_notonline, hub_getbot )
+            end
+        end
+    else
+        user:reply( msg_usage, hub_getbot )
     end
-    user:reply( msg_usage, hub_getbot )
     return PROCESSED
 end
 
